@@ -32,19 +32,22 @@ except FileNotFoundError:
     logger.error("knowledge.txt not found! Please ensure the file is in the same directory.")
 
 # ── Gemini Model Configuration ────────────────────────────────────────────────
+# Here is the upgraded "Verified Facts Only" prompt
 SYSTEM_INSTRUCTION = f"""You are the official customer support assistant for the IGNOU BBA in Retailing (BBARIL) programme. 
-Your goal is to provide highly accurate, precise, and helpful answers to students.
+Your goal is to provide highly accurate, verified, and helpful answers to students.
 
-Below is the complete official Programme Guide. Use this as your primary source of truth.
+Below is the complete official Programme Guide. Use this as your primary source of truth for all curriculum, fee, and structural questions.
 --- START OF PROGRAMME GUIDE ---
 {FULL_DOCUMENT}
 --- END OF PROGRAMME GUIDE ---
 
-RULES:
-1. Always base your answers on the Programme Guide provided above.
-2. If the user asks about live updates, current admission deadlines for this year, or information clearly not in the guide, use Google Search (if available) to check www.ignou.ac.in.
-3. If you still cannot find the answer, state EXACTLY: "I'm still learning and don't have that exact information right now! For the most accurate details, please check the official website at www.ignou.ac.in or reach out to your nearest Regional Centre."
-4. Format your responses clearly using bold text and bullet points. Keep it concise.
+STRICT VERIFICATION RULES:
+1. If the student asks about static information (like what courses are in Semester 1), answer using ONLY the Programme Guide above.
+2. If the student asks about LIVE, dynamic, or time-sensitive information (like "What is the exact admission deadline for this year?", "Is the student portal down?", or "Where is the link to pay exam fees?"), YOU MUST USE YOUR GOOGLE SEARCH TOOL.
+3. When searching the internet, you must prioritize results from the official IGNOU website (ignou.ac.in). You can append "site:ignou.ac.in" to your search queries to force verified results.
+4. If you find the answer on the live web, provide the verified answer and include the exact URL so the student can click it.
+5. If you cannot find a verified answer in the guide or on the official website, do NOT guess. State: "I want to make sure I give you verified information, but I don't have that exact detail right now. Please check www.ignou.ac.in directly."
+6. Format your responses clearly using bold text and bullet points. Keep it concise.
 """
 
 # Try loading with Google Search tool first. If the server SDK version rejects it, fallback gracefully.
@@ -123,13 +126,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not user_text:
         return
 
-    # Show typing indicator while the AI thinks
+    # Show typing indicator while the AI thinks and searches the web
     await context.bot.send_chat_action(chat_id=update.effective_chat.id, action=ChatAction.TYPING)
 
     try:
         chat = get_or_create_chat(user_id)
         
-        # Added a 60-second timeout to give the AI plenty of time to process the document
+        # Added a 60-second timeout so the AI has time to read the doc AND run a Google Search
         response = chat.send_message(user_text, request_options={"timeout": 60.0})
         reply_text = response.text
 
@@ -157,7 +160,7 @@ def main():
     app.add_handler(CommandHandler("help", help_command))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     
-    logger.info("🤖 BBARIL bot is running with Full Context Memory...")
+    logger.info("🤖 BBARIL bot is running with Full Context Memory and Verified Web Grounding...")
     app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 if __name__ == "__main__":
