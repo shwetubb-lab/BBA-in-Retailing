@@ -19,78 +19,43 @@ GEMINI_API_KEY = os.environ["GEMINI_API_KEY"]
 # ── Configure Gemini ──────────────────────────────────────────────────────────
 genai.configure(api_key=GEMINI_API_KEY)
 
-# ── Load and CHUNK knowledge base ────────────────────────────────────────────
-with open("knowledge.txt", "r", encoding="utf-8") as f:
-    FULL_DOCUMENT = f.read()
+# ── Load Knowledge Base ──────────────────────────────────────────────────────
+# Instead of chunking, we load the entire document. Gemini 2.5 Flash can easily 
+# read and comprehend the whole file instantly.
+try:
+    with open("knowledge.txt", "r", encoding="utf-8") as f:
+        FULL_DOCUMENT = f.read()
+    logger.info("Successfully loaded knowledge.txt into memory.")
+except FileNotFoundError:
+    FULL_DOCUMENT = "The BBARIL programme guide is currently unavailable."
+    logger.error("knowledge.txt not found! Please ensure the file is in the directory.")
 
-# Split document into small chunks of ~1500 chars with overlap
-CHUNK_SIZE = 1500
-OVERLAP = 200
+# ── Gemini model with Search Intelligence ─────────────────────────────────────
+SYSTEM_INSTRUCTION = f"""You are the official customer support assistant for the IGNOU BBA in Retailing (BBARIL) programme. 
+Your goal is to provide highly accurate, precise, and helpful answers to students.
 
-def make_chunks(text, size=CHUNK_SIZE, overlap=OVERLAP):
-    chunks = []
-    start = 0
-    while start < len(text):
-        end = start + size
-        chunks.append(text[start:end])
-        start += size - overlap
-    return chunks
+Below is the complete official Programme Guide. Use this as your primary source of truth.
+--- START OF PROGRAMME GUIDE ---
+{FULL_DOCUMENT}
+--- END OF PROGRAMME GUIDE ---
 
-CHUNKS = make_chunks(FULL_DOCUMENT)
-logger.info(f"Document split into {len(CHUNKS)} chunks")
+RULES:
+1. Always base your answers on the Programme Guide provided above.
+2. If the user asks about live updates, current admission deadlines for this year, or information clearly not in the guide, use your Google Search tool to check www.ignou.ac.in.
+3. If you still cannot find the answer after searching the document and the web, state: "I don't have that exact information right now! For the most accurate details, please check the official website at www.ignou.ac.in or reach out to your nearest Regional Centre."
+4. Format your responses clearly using bold text and bullet points where helpful.
+"""
 
-def get_relevant_chunks(query: str, top_n: int = 4) -> str:
-    """Find the most relevant chunks for a query using keyword matching."""
-    query_words = set(query.lower().split())
-    # Remove common stop words
-    stop_words = {"what","is","the","a","an","how","when","where","who","why","are","was",
-                  "i","me","my","can","do","does","please","tell","about","for","of","in",
-                  "to","and","or","it","its","this","that","with","on","at","by","from"}
-    keywords = query_words - stop_words
-    if not keywords:
-        keywords = query_words
-
-    scored = []
-    for i, chunk in enumerate(CHUNKS):
-        chunk_lower = chunk.lower()
-        score = sum(chunk_lower.count(word) for word in keywords)
-        scored.append((score, i, chunk))
-
-    # Sort by score descending, take top_n
-    scored.sort(key=lambda x: x[0], reverse=True)
-    top_chunks = [chunk for _, _, chunk in scored[:top_n]]
-    return "\n\n---\n\n".join(top_chunks)
-
-
-# ── Gemini model ──────────────────────────────────────────────────────────────
-SYSTEM_INSTRUCTION = (
-    "You are a helpful customer support assistant for the IGNOU BBA in Retailing (BBARIL) programme. "
-    "Answer questions using ONLY the document excerpts provided. Be concise and friendly. "
-    "Use bullet points with - for lists. "
-    "If the answer is not in the excerpts, say: I'm still learning and don't have that exact information right now! "
-    "For the most accurate details, please check the official website at www.ignou.ac.in or reach out to your nearest Regional Centre."
-)
-
-MODEL_NAMES = [
-    "gemini-2.0-flash-lite",
-    "gemini-2.0-flash",
-    "gemini-2.5-flash-lite",
-    "gemini-2.5-flash",
-]
-
-model = None
-for _name in MODEL_NAMES:
-    try:
-        _m = genai.GenerativeModel(model_name=_name, system_instruction=SYSTEM_INSTRUCTION)
-        _m.generate_content("hi")
-        model = _m
-        logger.info(f"Using model: {_name}")
-        break
-    except Exception as _e:
-        logger.warning(f"Model {_name} unavailable: {_e}")
-
-if model is None:
-    raise RuntimeError("No working Gemini model found! Check your GEMINI_API_KEY.")
+try:
+    # We use Gemini 2.5 Flash and enable the Google Search tool
+    model = genai.GenerativeModel(
+        model_name="gemini-2.5-flash",
+        system_instruction=SYSTEM_INSTRUCTION,
+        tools="google_search_retrieval" # This gives the bot live internet access
+    )
+    logger.info("Gemini Model initialized successfully with Google Search enabled.")
+except Exception as e:
+    raise RuntimeError(f"Failed to initialize Gemini model: {e}")
 
 # ── Chat sessions ─────────────────────────────────────────────────────────────
 chat_sessions = {}
@@ -117,7 +82,6 @@ def get_or_create_chat(user_id: int):
     return chat_sessions[user_id]
 
 # ── Handlers ──────────────────────────────────────────────────────────────────
-
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     chat_sessions[user.id] = model.start_chat(history=[])
@@ -150,18 +114,18 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     user_text = update.message.text.strip()
+    
     if not user_text:
         return
 
+    # Show typing indicator while the AI thinks and searches
     await context.bot.send_chat_action(chat_id=update.effective_chat.id, action=ChatAction.TYPING)
 
     try:
-        # Get only relevant chunks — keeps token usage low
-        relevant_context = get_relevant_chunks(user_text)
-        prompt = f"Document excerpts:\n\n{relevant_context}\n\nQuestion: {user_text}"
-
         chat = get_or_create_chat(user_id)
-        response = chat.send_message(prompt)
+        # The AI now reads the text, checks the whole document in its system instructions, 
+        # and runs a Google Search if needed.
+        response = chat.send_message(user_text)
         reply_text = response.text
 
     except Exception as e:
@@ -174,17 +138,19 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         await update.message.reply_text(reply_text, parse_mode="Markdown", reply_markup=get_keyboard())
     except Exception:
+        # Fallback if markdown formatting fails
         await update.message.reply_text(reply_text, reply_markup=get_keyboard())
 
 # ── Main ──────────────────────────────────────────────────────────────────────
-
 def main():
     app = Application.builder().token(TELEGRAM_TOKEN).build()
+    
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("reset", reset))
     app.add_handler(CommandHandler("help", help_command))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-    logger.info("🤖 BBARIL bot is running with Gemini (chunked retrieval)...")
+    
+    logger.info("🤖 BBARIL bot is running with Full Context Memory and Live Web Search...")
     app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 if __name__ == "__main__":
