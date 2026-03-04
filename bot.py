@@ -1,9 +1,9 @@
 import os
 import logging
-import google.generativeai as genai
 from telegram import Update, ReplyKeyboardMarkup, KeyboardButton
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 from telegram.constants import ChatAction
+import google.generativeai as genai
 
 # ── Logging ──────────────────────────────────────────────────────────────────
 logging.basicConfig(
@@ -12,34 +12,31 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# ── Env vars (set these in Railway/Render dashboard — never hardcode!) ────────
+# ── Env vars ──────────────────────────────────────────────────────────────────
 TELEGRAM_TOKEN = os.environ["TELEGRAM_TOKEN"]
 GEMINI_API_KEY = os.environ["GEMINI_API_KEY"]
 
 # ── Configure Gemini ──────────────────────────────────────────────────────────
 genai.configure(api_key=GEMINI_API_KEY)
+model = genai.GenerativeModel(
+    model_name="gemini-1.5-flash",
+    system_instruction=(
+        "You are a helpful and friendly customer support assistant for the BBA in Retailing "
+        "(BBARIL) programme at IGNOU (Indira Gandhi National Open University). "
+        "Answer questions based ONLY on the programme guide content provided in each message. "
+        "Be concise and warm. Use bullet points with • for lists. "
+        "If the answer is not in the document say: I don't have that specific information in "
+        "the programme guide. Please contact IGNOU directly at www.ignou.ac.in or visit your "
+        "nearest Regional Centre. Always be encouraging and supportive to students."
+    )
+)
 
 # ── Load knowledge base ───────────────────────────────────────────────────────
 with open("knowledge.txt", "r", encoding="utf-8") as f:
     DOCUMENT_KNOWLEDGE = f.read()
 
-SYSTEM_PROMPT = f"""You are a helpful and friendly customer support assistant for the BBA in Retailing (BBARIL) programme at IGNOU (Indira Gandhi National Open University).
-
-You answer questions based ONLY on the programme guide document provided below.
-
-Rules:
-- Answer only from the document content
-- Be concise, warm, and helpful — this is Telegram, so keep responses readable on mobile
-- Use simple formatting: bold with *text*, bullet points with •
-- If the answer is not in the document, say: "I don't have that specific information in the programme guide. Please contact IGNOU directly at www.ignou.ac.in or visit your nearest Regional Centre."
-- Always be encouraging and supportive to students
-
-PROGRAMME GUIDE DOCUMENT:
-{DOCUMENT_KNOWLEDGE}"""
-
-# ── In-memory conversation history per user ───────────────────────────────────
-conversation_histories = {}
-MAX_HISTORY = 10
+# ── In-memory chat sessions per user ─────────────────────────────────────────
+chat_sessions = {}
 
 SUGGESTED_QUESTIONS = [
     "What is BBARIL?",
@@ -53,38 +50,24 @@ SUGGESTED_QUESTIONS = [
 ]
 
 
-def get_suggestions_keyboard():
+def get_keyboard():
     buttons = [KeyboardButton(q) for q in SUGGESTED_QUESTIONS]
     rows = [buttons[i:i+2] for i in range(0, len(buttons), 2)]
     return ReplyKeyboardMarkup(rows, resize_keyboard=True, one_time_keyboard=False)
 
 
-def get_gemini_response(user_id: int, user_text: str) -> str:
-    if user_id not in conversation_histories:
-        conversation_histories[user_id] = []
+def get_or_create_chat(user_id: int):
+    if user_id not in chat_sessions:
+        chat_sessions[user_id] = model.start_chat(history=[])
+    return chat_sessions[user_id]
 
-    history = conversation_histories[user_id]
 
-    model = genai.GenerativeModel(
-        model_name="gemini-1.5-flash",
-        system_instruction=SYSTEM_PROMPT,
-    )
-    chat = model.start_chat(history=history)
-    response = chat.send_message(user_text)
-    reply = response.text
-
-    history.append({"role": "user", "parts": user_text})
-    history.append({"role": "model", "parts": reply})
-
-    if len(history) > MAX_HISTORY * 2:
-        conversation_histories[user_id] = history[-(MAX_HISTORY * 2):]
-
-    return reply
-
+# ── Handlers ──────────────────────────────────────────────────────────────────
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
-    conversation_histories[user.id] = []
+    # Reset session
+    chat_sessions[user.id] = model.start_chat(history=[])
 
     welcome = (
         f"👋 Hello {user.first_name}! I'm the *IGNOU BBARIL Programme Assistant*.\n\n"
@@ -95,15 +78,15 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         welcome,
         parse_mode="Markdown",
-        reply_markup=get_suggestions_keyboard()
+        reply_markup=get_keyboard()
     )
 
 
 async def reset(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    conversation_histories[update.effective_user.id] = []
+    chat_sessions[update.effective_user.id] = model.start_chat(history=[])
     await update.message.reply_text(
         "🔄 Conversation reset! Ask me anything about the BBARIL programme.",
-        reply_markup=get_suggestions_keyboard()
+        reply_markup=get_keyboard()
     )
 
 
@@ -140,20 +123,34 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
     try:
-        reply_text = get_gemini_response(user_id, user_text)
+        chat = get_or_create_chat(user_id)
+        # Include document in every message for context
+        prompt = f"Using this programme guide:\n\n{DOCUMENT_KNOWLEDGE}\n\nAnswer this question: {user_text}"
+        response = chat.send_message(prompt)
+        reply_text = response.text
+
     except Exception as e:
-        logger.error(f"Gemini API error: {e}")
+        logger.error(f"Gemini API error for user {user_id}: {e}", exc_info=True)
         reply_text = (
             "⚠️ Sorry, I ran into an issue. Please try again in a moment.\n"
             "If the problem persists, contact IGNOU directly at www.ignou.ac.in"
         )
 
-    await update.message.reply_text(
-        reply_text,
-        parse_mode="Markdown",
-        reply_markup=get_suggestions_keyboard()
-    )
+    # Send reply — fallback to plain text if Markdown fails
+    try:
+        await update.message.reply_text(
+            reply_text,
+            parse_mode="Markdown",
+            reply_markup=get_keyboard()
+        )
+    except Exception:
+        await update.message.reply_text(
+            reply_text,
+            reply_markup=get_keyboard()
+        )
 
+
+# ── Main ──────────────────────────────────────────────────────────────────────
 
 def main():
     app = Application.builder().token(TELEGRAM_TOKEN).build()
