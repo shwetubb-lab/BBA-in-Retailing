@@ -19,7 +19,7 @@ GEMINI_API_KEY = os.environ["GEMINI_API_KEY"]
 # ── Configure Gemini ──────────────────────────────────────────────────────────
 genai.configure(api_key=GEMINI_API_KEY)
 model = genai.GenerativeModel(
-    model_name="gemini-1.5-flash",
+    model_name="gemini-2.0-flash",
     system_instruction=(
         "You are a helpful and friendly customer support assistant for the BBA in Retailing "
         "(BBARIL) programme at IGNOU (Indira Gandhi National Open University). "
