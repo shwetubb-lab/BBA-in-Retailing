@@ -67,8 +67,8 @@ SYSTEM_INSTRUCTION = (
     "You are a helpful customer support assistant for the IGNOU BBA in Retailing (BBARIL) programme. "
     "Answer questions using ONLY the document excerpts provided. Be concise and friendly. "
     "Use bullet points with - for lists. "
-    "If the answer is not in the excerpts, say: I don't have that specific information. "
-    "Please contact IGNOU at www.ignou.ac.in or visit your nearest Regional Centre."
+    "If the answer is not in the excerpts, say: I'm still learning and don't have that exact information right now! "
+    "For the most accurate details, please check the official website at www.ignou.ac.in or reach out to your nearest Regional Centre."
 )
 
 MODEL_NAMES = [
@@ -167,8 +167,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         logger.error(f"Error for user {user_id}: {e}", exc_info=True)
         reply_text = (
-            "Sorry, I ran into an issue. Please try again.\n"
-            "Contact IGNOU at www.ignou.ac.in if this persists."
+            "Oops, I ran into a technical glitch! 🛠️ Please try asking your question again.\n\n"
+            "If this keeps happening, you can always find help on the IGNOU website at www.ignou.ac.in."
         )
 
     try:
