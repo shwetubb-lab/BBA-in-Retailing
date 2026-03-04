@@ -72,10 +72,10 @@ SYSTEM_INSTRUCTION = (
 )
 
 MODEL_NAMES = [
-    "gemini-2.0-flash",
     "gemini-2.0-flash-lite",
-    "gemini-1.5-flash",
-    "gemini-pro",
+    "gemini-2.0-flash",
+    "gemini-2.5-flash-lite",
+    "gemini-2.5-flash",
 ]
 
 model = None
