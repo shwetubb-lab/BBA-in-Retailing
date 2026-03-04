@@ -1,6 +1,6 @@
 import os
 import logging
-import anthropic
+import google.generativeai as genai
 from telegram import Update, ReplyKeyboardMarkup, KeyboardButton
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 from telegram.constants import ChatAction
@@ -12,9 +12,12 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# ── Env vars ─────────────────────────────────────────────────────────────────
+# ── Env vars (set these in Railway/Render dashboard — never hardcode!) ────────
 TELEGRAM_TOKEN = os.environ["TELEGRAM_TOKEN"]
-ANTHROPIC_API_KEY = os.environ["ANTHROPIC_API_KEY"]
+GEMINI_API_KEY = os.environ["GEMINI_API_KEY"]
+
+# ── Configure Gemini ──────────────────────────────────────────────────────────
+genai.configure(api_key=GEMINI_API_KEY)
 
 # ── Load knowledge base ───────────────────────────────────────────────────────
 with open("knowledge.txt", "r", encoding="utf-8") as f:
@@ -34,13 +37,9 @@ Rules:
 PROGRAMME GUIDE DOCUMENT:
 {DOCUMENT_KNOWLEDGE}"""
 
-# ── Anthropic client ──────────────────────────────────────────────────────────
-client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
-
 # ── In-memory conversation history per user ───────────────────────────────────
-# { user_id: [ {"role": "user"/"assistant", "content": "..."}, ... ] }
 conversation_histories = {}
-MAX_HISTORY = 10  # keep last 10 exchanges per user
+MAX_HISTORY = 10
 
 SUGGESTED_QUESTIONS = [
     "What is BBARIL?",
@@ -60,12 +59,32 @@ def get_suggestions_keyboard():
     return ReplyKeyboardMarkup(rows, resize_keyboard=True, one_time_keyboard=False)
 
 
-# ── Handlers ──────────────────────────────────────────────────────────────────
+def get_gemini_response(user_id: int, user_text: str) -> str:
+    if user_id not in conversation_histories:
+        conversation_histories[user_id] = []
+
+    history = conversation_histories[user_id]
+
+    model = genai.GenerativeModel(
+        model_name="gemini-1.5-flash",
+        system_instruction=SYSTEM_PROMPT,
+    )
+    chat = model.start_chat(history=history)
+    response = chat.send_message(user_text)
+    reply = response.text
+
+    history.append({"role": "user", "parts": user_text})
+    history.append({"role": "model", "parts": reply})
+
+    if len(history) > MAX_HISTORY * 2:
+        conversation_histories[user_id] = history[-(MAX_HISTORY * 2):]
+
+    return reply
+
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
-    user_id = user.id
-    conversation_histories[user_id] = []  # reset history
+    conversation_histories[user.id] = []
 
     welcome = (
         f"👋 Hello {user.first_name}! I'm the *IGNOU BBARIL Programme Assistant*.\n\n"
@@ -81,8 +100,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def reset(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    conversation_histories[user_id] = []
+    conversation_histories[update.effective_user.id] = []
     await update.message.reply_text(
         "🔄 Conversation reset! Ask me anything about the BBARIL programme.",
         reply_markup=get_suggestions_keyboard()
@@ -116,38 +134,15 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not user_text:
         return
 
-    # Show typing indicator
     await context.bot.send_chat_action(
         chat_id=update.effective_chat.id,
         action=ChatAction.TYPING
     )
 
-    # Build/update history
-    if user_id not in conversation_histories:
-        conversation_histories[user_id] = []
-
-    history = conversation_histories[user_id]
-    history.append({"role": "user", "content": user_text})
-
-    # Trim to max history
-    if len(history) > MAX_HISTORY * 2:
-        history = history[-(MAX_HISTORY * 2):]
-        conversation_histories[user_id] = history
-
     try:
-        response = client.messages.create(
-            model="claude-sonnet-4-20250514",
-            max_tokens=800,
-            system=SYSTEM_PROMPT,
-            messages=history,
-        )
-        reply_text = response.content[0].text
-
-        # Save assistant reply to history
-        history.append({"role": "assistant", "content": reply_text})
-
+        reply_text = get_gemini_response(user_id, user_text)
     except Exception as e:
-        logger.error(f"Anthropic API error: {e}")
+        logger.error(f"Gemini API error: {e}")
         reply_text = (
             "⚠️ Sorry, I ran into an issue. Please try again in a moment.\n"
             "If the problem persists, contact IGNOU directly at www.ignou.ac.in"
@@ -160,8 +155,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
-# ── Main ──────────────────────────────────────────────────────────────────────
-
 def main():
     app = Application.builder().token(TELEGRAM_TOKEN).build()
 
@@ -170,7 +163,7 @@ def main():
     app.add_handler(CommandHandler("help", help_command))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
-    logger.info("🤖 BBARIL bot is running...")
+    logger.info("🤖 BBARIL bot is running with Gemini...")
     app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 
