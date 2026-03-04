@@ -19,47 +19,80 @@ GEMINI_API_KEY = os.environ["GEMINI_API_KEY"]
 # ── Configure Gemini ──────────────────────────────────────────────────────────
 genai.configure(api_key=GEMINI_API_KEY)
 
+# ── Load and CHUNK knowledge base ────────────────────────────────────────────
+with open("knowledge.txt", "r", encoding="utf-8") as f:
+    FULL_DOCUMENT = f.read()
+
+# Split document into small chunks of ~1500 chars with overlap
+CHUNK_SIZE = 1500
+OVERLAP = 200
+
+def make_chunks(text, size=CHUNK_SIZE, overlap=OVERLAP):
+    chunks = []
+    start = 0
+    while start < len(text):
+        end = start + size
+        chunks.append(text[start:end])
+        start += size - overlap
+    return chunks
+
+CHUNKS = make_chunks(FULL_DOCUMENT)
+logger.info(f"Document split into {len(CHUNKS)} chunks")
+
+def get_relevant_chunks(query: str, top_n: int = 4) -> str:
+    """Find the most relevant chunks for a query using keyword matching."""
+    query_words = set(query.lower().split())
+    # Remove common stop words
+    stop_words = {"what","is","the","a","an","how","when","where","who","why","are","was",
+                  "i","me","my","can","do","does","please","tell","about","for","of","in",
+                  "to","and","or","it","its","this","that","with","on","at","by","from"}
+    keywords = query_words - stop_words
+    if not keywords:
+        keywords = query_words
+
+    scored = []
+    for i, chunk in enumerate(CHUNKS):
+        chunk_lower = chunk.lower()
+        score = sum(chunk_lower.count(word) for word in keywords)
+        scored.append((score, i, chunk))
+
+    # Sort by score descending, take top_n
+    scored.sort(key=lambda x: x[0], reverse=True)
+    top_chunks = [chunk for _, _, chunk in scored[:top_n]]
+    return "\n\n---\n\n".join(top_chunks)
+
+
+# ── Gemini model ──────────────────────────────────────────────────────────────
 SYSTEM_INSTRUCTION = (
-    "You are a helpful and friendly customer support assistant for the BBA in Retailing "
-    "(BBARIL) programme at IGNOU (Indira Gandhi National Open University). "
-    "Answer questions based ONLY on the programme guide content provided in each message. "
-    "Be concise and warm. Use bullet points with * for lists. "
-    "If the answer is not in the document say: I don't have that specific information in "
-    "the programme guide. Please contact IGNOU directly at www.ignou.ac.in or visit your "
-    "nearest Regional Centre. Always be encouraging and supportive to students."
+    "You are a helpful customer support assistant for the IGNOU BBA in Retailing (BBARIL) programme. "
+    "Answer questions using ONLY the document excerpts provided. Be concise and friendly. "
+    "Use bullet points with - for lists. "
+    "If the answer is not in the excerpts, say: I don't have that specific information. "
+    "Please contact IGNOU at www.ignou.ac.in or visit your nearest Regional Centre."
 )
 
-# Auto-detect working model
 MODEL_NAMES = [
     "gemini-2.0-flash",
     "gemini-2.0-flash-lite",
     "gemini-1.5-flash",
-    "gemini-1.5-flash-latest",
     "gemini-pro",
 ]
 
 model = None
-for _model_name in MODEL_NAMES:
+for _name in MODEL_NAMES:
     try:
-        _test = genai.GenerativeModel(
-            model_name=_model_name,
-            system_instruction=SYSTEM_INSTRUCTION,
-        )
-        _test.generate_content("hi")
-        model = _test
-        logger.info(f"Using Gemini model: {_model_name}")
+        _m = genai.GenerativeModel(model_name=_name, system_instruction=SYSTEM_INSTRUCTION)
+        _m.generate_content("hi")
+        model = _m
+        logger.info(f"Using model: {_name}")
         break
     except Exception as _e:
-        logger.warning(f"Model {_model_name} not available: {_e}")
+        logger.warning(f"Model {_name} unavailable: {_e}")
 
 if model is None:
     raise RuntimeError("No working Gemini model found! Check your GEMINI_API_KEY.")
 
-# ── Load knowledge base ───────────────────────────────────────────────────────
-with open("knowledge.txt", "r", encoding="utf-8") as f:
-    DOCUMENT_KNOWLEDGE = f.read()
-
-# ── In-memory chat sessions per user ─────────────────────────────────────────
+# ── Chat sessions ─────────────────────────────────────────────────────────────
 chat_sessions = {}
 
 SUGGESTED_QUESTIONS = [
@@ -73,36 +106,28 @@ SUGGESTED_QUESTIONS = [
     "Course structure",
 ]
 
-
 def get_keyboard():
     buttons = [KeyboardButton(q) for q in SUGGESTED_QUESTIONS]
     rows = [buttons[i:i+2] for i in range(0, len(buttons), 2)]
     return ReplyKeyboardMarkup(rows, resize_keyboard=True, one_time_keyboard=False)
-
 
 def get_or_create_chat(user_id: int):
     if user_id not in chat_sessions:
         chat_sessions[user_id] = model.start_chat(history=[])
     return chat_sessions[user_id]
 
-
 # ── Handlers ──────────────────────────────────────────────────────────────────
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     chat_sessions[user.id] = model.start_chat(history=[])
-    welcome = (
-        f"👋 Hello {user.first_name}! I'm the *IGNOU BBARIL Programme Assistant*.\n\n"
-        "I can help you with questions about the *BBA in Retailing* programme — "
-        "admissions, courses, fees, examinations, internships, and more.\n\n"
-        "Choose a topic below or type your own question:"
-    )
     await update.message.reply_text(
-        welcome,
+        f"👋 Hello {user.first_name}! I'm the *IGNOU BBARIL Programme Assistant*.\n\n"
+        "I can help with admissions, courses, fees, examinations, internships and more.\n\n"
+        "Choose a topic below or type your own question:",
         parse_mode="Markdown",
         reply_markup=get_keyboard()
     )
-
 
 async def reset(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_sessions[update.effective_user.id] = model.start_chat(history=[])
@@ -111,65 +136,45 @@ async def reset(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_markup=get_keyboard()
     )
 
-
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    help_text = (
-        "*BBARIL Programme Assistant — Help*\n\n"
-        "I answer questions about the IGNOU BBA in Retailing programme.\n\n"
-        "*Commands:*\n"
-        "/start — Welcome message & quick questions\n"
-        "/reset — Clear conversation history\n"
-        "/help — Show this message\n\n"
-        "*Topics I can help with:*\n"
-        "* Programme overview & eligibility\n"
-        "* Fee structure & admission process\n"
-        "* Course structure & subjects\n"
-        "* Internship & OJT requirements\n"
-        "* Assignments & examinations\n"
-        "* Regional centres & support services\n\n"
-        "Just type your question and I'll answer from the official programme guide!"
+    await update.message.reply_text(
+        "*BBARIL Programme Assistant*\n\n"
+        "Commands:\n"
+        "/start - Welcome & quick questions\n"
+        "/reset - Clear conversation\n"
+        "/help - This message\n\n"
+        "Topics: admissions, fees, courses, internship, exams, support services.",
+        parse_mode="Markdown"
     )
-    await update.message.reply_text(help_text, parse_mode="Markdown")
-
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     user_text = update.message.text.strip()
-
     if not user_text:
         return
 
-    await context.bot.send_chat_action(
-        chat_id=update.effective_chat.id,
-        action=ChatAction.TYPING
-    )
+    await context.bot.send_chat_action(chat_id=update.effective_chat.id, action=ChatAction.TYPING)
 
     try:
+        # Get only relevant chunks — keeps token usage low
+        relevant_context = get_relevant_chunks(user_text)
+        prompt = f"Document excerpts:\n\n{relevant_context}\n\nQuestion: {user_text}"
+
         chat = get_or_create_chat(user_id)
-        prompt = f"Using this programme guide:\n\n{DOCUMENT_KNOWLEDGE}\n\nAnswer this question: {user_text}"
         response = chat.send_message(prompt)
         reply_text = response.text
 
     except Exception as e:
-        logger.error(f"Gemini API error for user {user_id}: {e}", exc_info=True)
+        logger.error(f"Error for user {user_id}: {e}", exc_info=True)
         reply_text = (
-            "Sorry, I ran into an issue. Please try again in a moment.\n"
-            "If the problem persists, contact IGNOU directly at www.ignou.ac.in"
+            "Sorry, I ran into an issue. Please try again.\n"
+            "Contact IGNOU at www.ignou.ac.in if this persists."
         )
 
-    # Send reply — fallback to plain text if Markdown parse fails
     try:
-        await update.message.reply_text(
-            reply_text,
-            parse_mode="Markdown",
-            reply_markup=get_keyboard()
-        )
+        await update.message.reply_text(reply_text, parse_mode="Markdown", reply_markup=get_keyboard())
     except Exception:
-        await update.message.reply_text(
-            reply_text,
-            reply_markup=get_keyboard()
-        )
-
+        await update.message.reply_text(reply_text, reply_markup=get_keyboard())
 
 # ── Main ──────────────────────────────────────────────────────────────────────
 
@@ -179,9 +184,8 @@ def main():
     app.add_handler(CommandHandler("reset", reset))
     app.add_handler(CommandHandler("help", help_command))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-    logger.info("🤖 BBARIL bot is running with Gemini...")
+    logger.info("🤖 BBARIL bot is running with Gemini (chunked retrieval)...")
     app.run_polling(allowed_updates=Update.ALL_TYPES)
-
 
 if __name__ == "__main__":
     main()
