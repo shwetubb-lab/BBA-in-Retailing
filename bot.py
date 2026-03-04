@@ -18,18 +18,42 @@ GEMINI_API_KEY = os.environ["GEMINI_API_KEY"]
 
 # ── Configure Gemini ──────────────────────────────────────────────────────────
 genai.configure(api_key=GEMINI_API_KEY)
-model = genai.GenerativeModel(
-    model_name="gemini-2.0-flash",
-    system_instruction=(
-        "You are a helpful and friendly customer support assistant for the BBA in Retailing "
-        "(BBARIL) programme at IGNOU (Indira Gandhi National Open University). "
-        "Answer questions based ONLY on the programme guide content provided in each message. "
-        "Be concise and warm. Use bullet points with • for lists. "
-        "If the answer is not in the document say: I don't have that specific information in "
-        "the programme guide. Please contact IGNOU directly at www.ignou.ac.in or visit your "
-        "nearest Regional Centre. Always be encouraging and supportive to students."
-    )
+
+SYSTEM_INSTRUCTION = (
+    "You are a helpful and friendly customer support assistant for the BBA in Retailing "
+    "(BBARIL) programme at IGNOU (Indira Gandhi National Open University). "
+    "Answer questions based ONLY on the programme guide content provided in each message. "
+    "Be concise and warm. Use bullet points with * for lists. "
+    "If the answer is not in the document say: I don't have that specific information in "
+    "the programme guide. Please contact IGNOU directly at www.ignou.ac.in or visit your "
+    "nearest Regional Centre. Always be encouraging and supportive to students."
 )
+
+# Auto-detect working model
+MODEL_NAMES = [
+    "gemini-2.0-flash",
+    "gemini-2.0-flash-lite",
+    "gemini-1.5-flash",
+    "gemini-1.5-flash-latest",
+    "gemini-pro",
+]
+
+model = None
+for _model_name in MODEL_NAMES:
+    try:
+        _test = genai.GenerativeModel(
+            model_name=_model_name,
+            system_instruction=SYSTEM_INSTRUCTION,
+        )
+        _test.generate_content("hi")
+        model = _test
+        logger.info(f"Using Gemini model: {_model_name}")
+        break
+    except Exception as _e:
+        logger.warning(f"Model {_model_name} not available: {_e}")
+
+if model is None:
+    raise RuntimeError("No working Gemini model found! Check your GEMINI_API_KEY.")
 
 # ── Load knowledge base ───────────────────────────────────────────────────────
 with open("knowledge.txt", "r", encoding="utf-8") as f:
@@ -66,9 +90,7 @@ def get_or_create_chat(user_id: int):
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
-    # Reset session
     chat_sessions[user.id] = model.start_chat(history=[])
-
     welcome = (
         f"👋 Hello {user.first_name}! I'm the *IGNOU BBARIL Programme Assistant*.\n\n"
         "I can help you with questions about the *BBA in Retailing* programme — "
@@ -99,12 +121,12 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/reset — Clear conversation history\n"
         "/help — Show this message\n\n"
         "*Topics I can help with:*\n"
-        "• Programme overview & eligibility\n"
-        "• Fee structure & admission process\n"
-        "• Course structure & subjects\n"
-        "• Internship & OJT requirements\n"
-        "• Assignments & examinations\n"
-        "• Regional centres & support services\n\n"
+        "* Programme overview & eligibility\n"
+        "* Fee structure & admission process\n"
+        "* Course structure & subjects\n"
+        "* Internship & OJT requirements\n"
+        "* Assignments & examinations\n"
+        "* Regional centres & support services\n\n"
         "Just type your question and I'll answer from the official programme guide!"
     )
     await update.message.reply_text(help_text, parse_mode="Markdown")
@@ -124,7 +146,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     try:
         chat = get_or_create_chat(user_id)
-        # Include document in every message for context
         prompt = f"Using this programme guide:\n\n{DOCUMENT_KNOWLEDGE}\n\nAnswer this question: {user_text}"
         response = chat.send_message(prompt)
         reply_text = response.text
@@ -132,11 +153,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         logger.error(f"Gemini API error for user {user_id}: {e}", exc_info=True)
         reply_text = (
-            "⚠️ Sorry, I ran into an issue. Please try again in a moment.\n"
+            "Sorry, I ran into an issue. Please try again in a moment.\n"
             "If the problem persists, contact IGNOU directly at www.ignou.ac.in"
         )
 
-    # Send reply — fallback to plain text if Markdown fails
+    # Send reply — fallback to plain text if Markdown parse fails
     try:
         await update.message.reply_text(
             reply_text,
@@ -154,12 +175,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 def main():
     app = Application.builder().token(TELEGRAM_TOKEN).build()
-
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("reset", reset))
     app.add_handler(CommandHandler("help", help_command))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-
     logger.info("🤖 BBARIL bot is running with Gemini...")
     app.run_polling(allowed_updates=Update.ALL_TYPES)
 
